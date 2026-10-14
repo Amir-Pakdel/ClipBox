@@ -1,0 +1,81 @@
+[package]
+name = "clipbox"
+version = "1.0.0"
+edition = "2024"
+description = "A small, keyboard-first clipboard history"
+readme = "README.md"
+repository = "https://github.com/Amir-Pakdel/ClipBox"
+keywords = ["clipboard", "history"]
+categories = ["gui", "command-line-utilities"]
+
+[dependencies]
+gpui = "0.2.2"
+futures = "0.3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+[build-dependencies]
+embed-resource = "3.0"
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+arboard = "3"
+enigo = "0.6"
+fs2 = "0.4"
+global-hotkey = "0.8"
+libc = "0.2"
+raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
+x11 = { version = "2.21", features = ["xlib"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+tray-icon = { version = "0.26", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Security",
+  "Win32_System_Com",
+  "Win32_System_DataExchange",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Memory",
+  "Win32_System_Ole",
+  "Win32_System_Registry",
+  "Win32_System_Threading",
+  "Win32_System_Time",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+# Fast day-to-day builds: `cargo run`. Our code builds quickly, dependencies are optimized once.
+# Deps stay at opt-level 1 so release/debug builds fit in ~16GB RAM machines (gpui + pulp + windows).
+[profile.dev]
+opt-level = 1
+debug = false
+incremental = true
+
+[profile.dev.package."*"]
+opt-level = 1
+
+[profile.release]
+opt-level = 2
+lto = false
+codegen-units = 16
+panic = "abort"
+strip = true
+
+# Smallest/fastest binary for daily use (slow to build): `cargo build --profile dist`
+# Prefer `cargo build --release` on machines with under ~16GB free RAM.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 8
+
+# GPUI with two small fixes (see vendor/gpui/PATCHES.md): right-to-left text and fxc.exe lookup.
+[patch.crates-io]
+gpui = { path = "vendor/gpui" }

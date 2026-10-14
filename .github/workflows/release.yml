@@ -1,0 +1,108 @@
+# On a version tag, build ClipBox for Windows, Linux, and macOS and publish
+# a GitHub Release. GitHub attaches the source zip and tar.gz itself.
+# `git tag v1.0.0 && git push origin v1.0.0`
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+    branches: ["**"]
+    paths-ignore: ["**.md"]
+  pull_request:
+    paths-ignore: ["**.md"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  check:
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            packages: ""
+          - os: ubuntu-24.04
+            packages: libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libx11-xcb-dev libvulkan-dev pkg-config libssl-dev cmake libasound2-dev libxdo-dev
+          - os: macos-latest
+            packages: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: check-${{ matrix.os }}
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+      - run: cargo check --locked
+
+  build:
+    if: startsWith(github.ref, 'refs/tags/')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset: clipbox-windows-x64.zip
+            bin: clipbox.exe
+            packages: ""
+          - os: ubuntu-24.04
+            asset: clipbox-linux-x64.tar.gz
+            bin: clipbox
+            packages: libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libx11-xcb-dev libvulkan-dev pkg-config libssl-dev cmake libasound2-dev libxdo-dev
+          - os: ubuntu-24.04-arm
+            asset: clipbox-linux-arm64.tar.gz
+            bin: clipbox
+            packages: libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libx11-xcb-dev libvulkan-dev pkg-config libssl-dev cmake libasound2-dev libxdo-dev
+          - os: macos-latest
+            asset: clipbox-macos-arm64.tar.gz
+            bin: clipbox
+            packages: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.os }}-${{ matrix.asset }}
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+      - name: Build
+        run: cargo build --locked --release
+        env:
+          CARGO_BUILD_JOBS: "2"
+      - name: Pack Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path target/release/${{ matrix.bin }} -DestinationPath ${{ matrix.asset }}
+      - name: Pack Unix
+        if: runner.os != 'Windows'
+        run: tar -C target/release -czf ${{ matrix.asset }} ${{ matrix.bin }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
