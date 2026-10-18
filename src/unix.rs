@@ -125,6 +125,7 @@ pub fn write(_owner: isize, kind: Kind, text: &str, plain: bool) {
 pub fn paste_into(_prev: isize) {
     thread::spawn(|| {
         thread::sleep(Duration::from_millis(80));
+        use enigo::Keyboard;
         let Ok(mut enigo) = enigo::Enigo::new(&enigo::Settings::default()) else { return };
         let modifier = if cfg!(target_os = "macos") { enigo::Key::Meta } else { enigo::Key::Control };
         let _ = enigo.key(modifier, enigo::Direction::Press);
@@ -212,7 +213,8 @@ fn hotkey_for(ix: usize) -> HotKey {
 }
 
 fn apply_hotkey(manager: &GlobalHotKeyManager) {
-    let _ = manager.unregister_all();
+    let keys: Vec<HotKey> = (0..HOTKEYS.len()).map(hotkey_for).collect();
+    let _ = manager.unregister_all(&keys);
     let _ = manager.register(hotkey_for(HOTKEY.load(Relaxed) as usize));
 }
 
@@ -234,12 +236,12 @@ fn listen(tx: UnboundedSender<Event>, dir: PathBuf) {
     loop {
         #[cfg(target_os = "linux")]
         {
-            let gen = HOTKEY_GEN.load(Relaxed);
-            if gen != seen {
+            let generation = HOTKEY_GEN.load(Relaxed);
+            if generation != seen {
                 if let Some(manager) = &manager {
                     apply_hotkey(manager);
                 }
-                seen = gen;
+                seen = generation;
             }
         }
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
@@ -363,7 +365,7 @@ fn command_has(cmd: &str, args: &[&str], needle: &str) -> bool {
 fn mac_order(hwnd: isize, front: bool) {
     if hwnd == 0 { return; }
     #[link(name = "AppKit", kind = "framework")]
-    extern "C" {}
+    unsafe extern "C" {}
     unsafe {
         use objc::runtime::{Object, YES};
         use objc::{class, msg_send, sel, sel_impl};
