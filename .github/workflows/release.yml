@@ -29,7 +29,7 @@ jobs:
           - os: windows-latest
             packages: ""
           - os: ubuntu-24.04
-            packages: libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libx11-xcb-dev libvulkan-dev pkg-config libssl-dev cmake libasound2-dev libxdo-dev
+            packages: libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev libx11-xcb-dev libvulkan-dev pkg-config libssl-dev cmake libasound2-dev libxdo-dev
           - os: macos-latest
             packages: ""
     runs-on: ${{ matrix.os }}
@@ -57,11 +57,11 @@ jobs:
           - os: ubuntu-24.04
             asset: clipbox-linux-x64.tar.gz
             bin: clipbox
-            packages: libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libx11-xcb-dev libvulkan-dev pkg-config libssl-dev cmake libasound2-dev libxdo-dev
+            packages: libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev libx11-xcb-dev libvulkan-dev pkg-config libssl-dev cmake libasound2-dev libxdo-dev
           - os: ubuntu-24.04-arm
             asset: clipbox-linux-arm64.tar.gz
             bin: clipbox
-            packages: libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libx11-xcb-dev libvulkan-dev pkg-config libssl-dev cmake libasound2-dev libxdo-dev
+            packages: libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev libx11-xcb-dev libvulkan-dev pkg-config libssl-dev cmake libasound2-dev libxdo-dev
           - os: macos-latest
             asset: clipbox-macos-arm64.tar.gz
             bin: clipbox
