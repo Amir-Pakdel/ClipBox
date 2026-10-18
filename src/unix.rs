@@ -137,6 +137,11 @@ pub fn foreground() -> isize {
     HWND.load(Relaxed)
 }
 
+pub fn awaiting_activation() -> bool { false }
+pub fn became_active() {}
+pub fn is_zoomed(_hwnd: isize) -> bool { false }
+pub fn toggle_zoom(_hwnd: isize) {}
+
 pub fn show(hwnd: isize) {
     match KIND.load(Relaxed) {
         KIND_MAC => mac_order(hwnd, true),

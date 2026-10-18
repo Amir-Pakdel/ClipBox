@@ -22,7 +22,6 @@ use store::{Item, Kind, Store, human};
 const FONT: &str = "Cascadia Mono";
 const W: f32 = 640.;
 const H: f32 = 460.;
-
 // ─────────────────────────────── look ───────────────────────────────
 
 struct Theme { bg: u32, panel: u32, fg: u32, dim: u32, faint: u32, line: u32 }
@@ -118,7 +117,9 @@ impl ClipBox {
         // Never quit from the window chrome: Alt+F4 / × / outside click → hide to tray.
         window.on_window_should_close(cx, move |_, _| { win::hide(hwnd); false });
         cx.observe_window_activation(window, |this, window, _| {
-            if !window.is_window_active() {
+            if window.is_window_active() {
+                win::became_active();
+            } else if !win::awaiting_activation() {
                 win::hide(this.hwnd);
             }
         }).detach();
@@ -532,7 +533,7 @@ impl Render for ClipBox {
             div().flex().gap(px(5.)).child(div().text_color(rgb(t.fg)).child(k)).child(what)
         };
         let small = self.fs() - 1.5;
-        let maximized = window.is_maximized();
+        let maximized = if cfg!(windows) { win::is_zoomed(self.hwnd) } else { window.is_maximized() };
         // Title-bar style controls: minimize / maximize|restore / close (close = hide to tray).
         let ctrl = |id: &'static str, glyph: &'static str, close: bool| {
             let dim = t.dim;
@@ -580,13 +581,27 @@ impl Render for ClipBox {
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| { this.set_cat(i); cx.notify(); }))
                     }))
                     .child(
-                        div().flex().items_center().gap(px(2.)).ml(px(4.))
+                        div().flex_none().flex().items_center().gap(px(2.)).ml(px(4.))
                             .child(ctrl("win-min", "─", false).on_click(cx.listener(|_, _: &ClickEvent, window, _| {
                                 window.minimize_window();
                             })))
-                            .child(ctrl("win-max", if maximized { "❐" } else { "□" }, false).on_click(cx.listener(|_, _: &ClickEvent, window, cx| {
-                                window.zoom_window();
-                                cx.notify();
+                            .child(ctrl("win-max", if maximized { "❐" } else { "□" }, false).on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                // Apply after the click returns. Doing it inside the mouse message
+                                // lets Windows keep the old size and only slide the window to the corner.
+                                #[cfg(windows)]
+                                {
+                                    let hwnd = this.hwnd;
+                                    cx.defer_in(window, move |_this, _window, cx| {
+                                        win::toggle_zoom(hwnd);
+                                        cx.notify();
+                                    });
+                                }
+                                #[cfg(not(windows))]
+                                {
+                                    let _ = this;
+                                    window.zoom_window();
+                                    cx.notify();
+                                }
                             })))
                             .child(ctrl("win-close", "×", true).on_click(cx.listener(|this, _: &ClickEvent, _, _| {
                                 // Hide to tray — full exit is only via the tray menu.
@@ -774,12 +789,24 @@ impl ClipBox {
             .child(div().px(px(14.)).pt(px(8.)).flex().gap(px(10.)).text_size(px(self.fs() - 1.5)).text_color(rgb(t.faint))
                 .child("↑↓ choose · ←→ change · esc close")
                 .child(div().flex_1())
+                .child(div().id("gh").cursor_pointer().text_color(rgb(atext)).child("github.com/Amir-Pakdel")
+                    .on_click(|_: &ClickEvent, _, _| { let _ = open_github(); }))
                 .child(format!("v{}", env!("CARGO_PKG_VERSION"))));
         // `occlude` keeps clicks from reaching the list underneath.
         div().id("settings-layer").absolute().inset_0().occlude().flex().items_center().justify_center()
             .bg(gpui::rgba(if self.dark { 0x0a0a0cb0 } else { 0x18181b40 }))
             .child(panel)
     }
+}
+
+fn open_github() -> std::io::Result<std::process::Child> {
+    let url = "https://github.com/Amir-Pakdel";
+    #[cfg(windows)]
+    { std::process::Command::new("cmd").args(["/c", "start", "", url]).spawn() }
+    #[cfg(target_os = "macos")]
+    { std::process::Command::new("open").arg(url).spawn() }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    { std::process::Command::new("xdg-open").arg(url).spawn() }
 }
 
 // ─────────────────────────────── main ───────────────────────────────

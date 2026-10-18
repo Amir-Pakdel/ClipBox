@@ -6,7 +6,7 @@
 
 use crate::store::{Kind, NewClip, hash};
 use futures::channel::mpsc::UnboundedSender;
-use std::{ffi::c_void, path::{Path, PathBuf}, sync::{OnceLock, atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicUsize, Ordering::Relaxed}}, thread, time::Duration};
+use std::{ffi::c_void, path::{Path, PathBuf}, sync::{OnceLock, atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicUsize, Ordering::Relaxed}}, thread, time::Duration};
 use windows::{
     Win32::{
         Foundation::*,
@@ -58,6 +58,12 @@ static MENU_HOVER: AtomicIsize = AtomicIsize::new(0);
 static MENU_RESULT: AtomicUsize = AtomicUsize::new(0);
 static MENU_DONE: AtomicBool = AtomicBool::new(false);
 static MENU_HWND: AtomicIsize = AtomicIsize::new(0);
+/// Tray Open asked us to show. Ignore the deactivate Windows sends before we are actually in front.
+static AWAITING_ACTIVATE: AtomicBool = AtomicBool::new(false);
+/// Borderless popups stay "zoomed" even when `IsZoomed` does not flip back.
+static ZOOMED: AtomicBool = AtomicBool::new(false);
+/// Window rect (screen pixels) from before the last maximize.
+static RESTORED: [AtomicI32; 4] = [AtomicI32::new(0), AtomicI32::new(0), AtomicI32::new(0), AtomicI32::new(0)];
 
 /// Hotkeys offered in settings: (label, modifiers, virtual key).
 pub const HOTKEYS: [(&str, u32, u32); 5] = [
@@ -233,6 +239,41 @@ fn to_colorref(rgb: u32) -> COLORREF {
     COLORREF(((rgb & 0xff) << 16) | (rgb & 0xff00) | ((rgb >> 16) & 0xff))
 }
 
+fn pointer_inside(hwnd: HWND) -> bool {
+    unsafe {
+        let mut pt = POINT::default();
+        if GetCursorPos(&mut pt).is_err() { return false; }
+        let mut rc = RECT::default();
+        if GetWindowRect(hwnd, &mut rc).is_err() { return false; }
+        pt.x >= rc.left && pt.x < rc.right && pt.y >= rc.top && pt.y < rc.bottom
+    }
+}
+
+/// Hotkeys may call SetForegroundWindow. A click in our own tray menu may not,
+/// so tap Alt (key-up immediately) the same way gpui does, then raise the window.
+fn force_foreground(hwnd: HWND) {
+    unsafe {
+        if GetForegroundWindow() == hwnd { return; }
+        let inputs = [
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT { wVk: VK_MENU, ..Default::default() },
+                },
+            },
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT { wVk: VK_MENU, dwFlags: KEYEVENTF_KEYUP, ..Default::default() },
+                },
+            },
+        ];
+        let _ = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = BringWindowToTop(hwnd);
+    }
+}
+
 // FastBox-style tray popup: compact header + Open / Exit, left accent rail on hover.
 const MENU_W: i32 = 148;
 const MENU_HEADER: i32 = 28;
@@ -271,6 +312,8 @@ unsafe fn register_menu_class(inst: HINSTANCE) {
 }
 
 unsafe fn close_menu(cmd: usize) {
+    // Destroying the popup deactivates it and would otherwise overwrite Open/Exit with cancel.
+    if MENU_DONE.load(Relaxed) { return; }
     MENU_RESULT.store(cmd, Relaxed);
     MENU_DONE.store(true, Relaxed);
     let h = MENU_HWND.load(Relaxed);
@@ -427,7 +470,9 @@ unsafe extern "system" fn menu_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             }
             WM_ACTIVATE => {
                 // Lost focus (clicked another window) → dismiss.
-                if (wp.0 as u32 & 0xffff) == 0 {
+                // A click on Open itself also deactivates this tool window before
+                // WM_LBUTTONUP; don't treat that as a cancel while the pointer is still inside.
+                if (wp.0 as u32 & 0xffff) == 0 && !pointer_inside(hwnd) {
                     close_menu(0);
                 }
                 LRESULT(0)
@@ -492,13 +537,14 @@ unsafe fn show_tray_menu(_owner: HWND, tx: &UnboundedSender<Event>) {
             DispatchMessageW(&msg);
         }
 
+        let cmd = MENU_RESULT.load(Relaxed);
         if GetCapture().0 == hwnd.0 {
             let _ = ReleaseCapture();
         }
         let _ = DestroyWindow(hwnd);
         MENU_HWND.store(0, Relaxed);
 
-        match MENU_RESULT.load(Relaxed) {
+        match cmd {
             ID_OPEN => { tx.unbounded_send(Event::Open).ok(); }
             ID_EXIT => { tx.unbounded_send(Event::Quit).ok(); }
             _ => {}
@@ -767,15 +813,120 @@ pub fn paste_into(prev: isize) {
     });
 }
 
+/// True while a tray Open is still waiting for Windows to hand us focus.
+pub fn awaiting_activation() -> bool { AWAITING_ACTIVATE.load(Relaxed) }
+pub fn became_active() { AWAITING_ACTIVATE.store(false, Relaxed); }
+
 pub fn foreground() -> isize { unsafe { GetForegroundWindow().0 as isize } }
+
+pub fn is_zoomed(_hwnd: isize) -> bool {
+    ZOOMED.load(Relaxed)
+}
+
+/// Full bounds of the monitor under this window.
+fn monitor_bounds(hwnd: HWND) -> RECT {
+    unsafe {
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if GetMonitorInfoW(mon, &mut info).as_bool() {
+            return info.rcMonitor;
+        }
+        RECT {
+            left: 0,
+            top: 0,
+            right: GetSystemMetrics(SM_CXSCREEN),
+            bottom: GetSystemMetrics(SM_CYSCREEN),
+        }
+    }
+}
+
+fn place(hwnd: HWND, rc: RECT) {
+    unsafe {
+        let w = (rc.right - rc.left).max(1);
+        let h = (rc.bottom - rc.top).max(1);
+        // Leave the window style alone. Adding a sizing frame makes Windows keep a
+        // native caption, and after restore that caption covers the custom buttons.
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            rc.left,
+            rc.top,
+            w,
+            h,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+        // SetWindowPos tells gpui the new size while gpui is still inside the click
+        // update, so that update is dropped and the layout stays the old size in the
+        // corner. Post the client size; it is handled once the click has returned.
+        let mut client = RECT::default();
+        let _ = GetClientRect(hwnd, &mut client);
+        let cw = (client.right - client.left).max(1) as isize;
+        let ch = (client.bottom - client.top).max(1) as isize;
+        let _ = PostMessageW(
+            Some(hwnd),
+            WM_SIZE,
+            WPARAM(0),
+            LPARAM((ch << 16) | (cw & 0xffff)),
+        );
+    }
+}
+
+/// Fill the monitor, or put the window back. `SW_MAXIMIZE` only slides this borderless popup to the corner.
+pub fn toggle_zoom(hwnd: isize) {
+    unsafe {
+        let hwnd = HWND(hwnd as *mut c_void);
+        if hwnd.0.is_null() { return; }
+        if IsZoomed(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        if ZOOMED.load(Relaxed) {
+            let rc = RECT {
+                left: RESTORED[0].load(Relaxed),
+                top: RESTORED[1].load(Relaxed),
+                right: RESTORED[2].load(Relaxed),
+                bottom: RESTORED[3].load(Relaxed),
+            };
+            if rc.right > rc.left && rc.bottom > rc.top {
+                place(hwnd, rc);
+            }
+            ZOOMED.store(false, Relaxed);
+        } else {
+            let mut rc = RECT::default();
+            let _ = GetWindowRect(hwnd, &mut rc);
+            RESTORED[0].store(rc.left, Relaxed);
+            RESTORED[1].store(rc.top, Relaxed);
+            RESTORED[2].store(rc.right, Relaxed);
+            RESTORED[3].store(rc.bottom, Relaxed);
+            place(hwnd, monitor_bounds(hwnd));
+            ZOOMED.store(true, Relaxed);
+        }
+    }
+}
 
 pub fn show(hwnd: isize) {
     unsafe {
+        AWAITING_ACTIVATE.store(true, Relaxed);
         APP_HWND.store(hwnd, Relaxed);
         let me = HWND(hwnd as *mut c_void);
+        // PopUp windows are WS_EX_TOOLWINDOW, which Windows keeps out of the taskbar.
+        // Swap that for APPWINDOW while the window is open so the button shows.
+        taskbar_button(me, true);
+        let _ = SetWindowTextW(me, w!("ClipBox"));
+        // Already visible: hide then show so the shell rebuilds the taskbar button.
+        // From the tray the window is hidden; an extra SW_HIDE would deactivate it again.
+        if IsWindowVisible(me).as_bool() {
+            let _ = ShowWindow(me, SW_HIDE);
+        }
         let _ = ShowWindow(me, SW_SHOW);
         // Become foreground so a later outside click reliably deactivates us too.
-        let _ = SetForegroundWindow(me);
+        // A tray-menu click does not grant this the way a registered hotkey does.
+        force_foreground(me);
+        if GetForegroundWindow() == me {
+            AWAITING_ACTIVATE.store(false, Relaxed);
+        }
         let dim = HWND(DIM.load(Relaxed) as *mut c_void);
         if !dim.0.is_null() {
             // Always show the dim as an outside-click catcher. Alpha 0 → nearly invisible (1).
@@ -791,12 +942,38 @@ pub fn show(hwnd: isize) {
 
 pub fn hide(hwnd: isize) {
     unsafe {
-        let _ = ShowWindow(HWND(hwnd as *mut c_void), SW_HIDE);
+        AWAITING_ACTIVATE.store(false, Relaxed);
+        let me = HWND(hwnd as *mut c_void);
+        let _ = ShowWindow(me, SW_HIDE);
+        taskbar_button(me, false);
         let dim = DIM.load(Relaxed);
         if dim != 0 {
             let _ = ShowWindow(HWND(dim as *mut c_void), SW_HIDE);
         }
         APP_HWND.store(0, Relaxed);
+    }
+}
+
+/// Put the open window on the taskbar, and take it off again once it is hidden.
+fn taskbar_button(hwnd: HWND, on: bool) {
+    unsafe {
+        if hwnd.0.is_null() { return; }
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let ex = if on {
+            (ex & !(WS_EX_TOOLWINDOW.0 as isize)) | (WS_EX_APPWINDOW.0 as isize)
+        } else {
+            (ex & !(WS_EX_APPWINDOW.0 as isize)) | (WS_EX_TOOLWINDOW.0 as isize)
+        };
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
     }
 }
 
